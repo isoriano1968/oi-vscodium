@@ -1,0 +1,19 @@
+@vscode/gulp-electron: pass unsafelyDisableChecksums on to @electron/get.
+download() builds its own options for downloadArtifact and passes
+unsafelyDisableChecksums only for a custom repo, so VS Code's
+build/lib/electron.ts setting is lost: @electron/get checks a cached zip of
+our own Electron against the release's SHASUMS, finds it wrong, and replaces
+it with the official Linux build (seen 2026-11-19 on OpenIndiana).
+Upstream: https://github.com/microsoft/vscode-gulp-electron (not sent yet)
+
+--- a/src/download.js
++++ b/src/download.js
+@@ -195,6 +195,8 @@
+     artifactName: opts.artifactName,
+     artifactSuffix: opts.artifactSuffix,
+     token: opts.token,
++    // Passed through, so a cached zip of our own Electron is used as is.
++    unsafelyDisableChecksums: opts.unsafelyDisableChecksums,
+     downloadOptions: {
+       getProgressCallback: (progress) => {
+         if (bar) bar.update(progress.percent);

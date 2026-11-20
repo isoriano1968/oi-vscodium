@@ -1,0 +1,39 @@
+illumos (process.platform 'sunos') takes VS Code's Linux code paths, as FreeBSD's
+port does for freebsd: isLinux, the XDG user data path, and ps(1) with System V
+options in the process explorer.
+Could go upstream (microsoft/vscode).
+
+--- a/src/vs/base/common/platform.ts
++++ b/src/vs/base/common/platform.ts
+@@ -76,7 +76,8 @@
+ if (typeof nodeProcess === 'object') {
+ 	_isWindows = (nodeProcess.platform === 'win32');
+ 	_isMacintosh = (nodeProcess.platform === 'darwin');
+-	_isLinux = (nodeProcess.platform === 'linux');
++	// illumos (process.platform 'sunos') takes the Linux code paths.
++	_isLinux = (nodeProcess.platform === 'linux' || nodeProcess.platform === 'sunos');
+ 	_isLinuxSnap = _isLinux && !!nodeProcess.env['SNAP'] && !!nodeProcess.env['SNAP_REVISION'];
+ 	_isElectron = isElectronProcess;
+ 	_isCI = !!nodeProcess.env['CI'] || !!nodeProcess.env['BUILD_ARTIFACTSTAGINGDIRECTORY'] || !!nodeProcess.env['GITHUB_WORKSPACE'];
+--- a/src/vs/base/node/ps.ts
++++ b/src/vs/base/node/ps.ts
+@@ -217,7 +217,8 @@
+ 					}
+ 				} else {
+ 					const ps = stdout.toString().trim();
+-					const args = '-ax -o pid=,ppid=,pcpu=,pmem=,command=';
++					// illumos ps(1) takes System V options
++					const args = process.platform === 'sunos' ? '-e -o pid=,ppid=,pcpu=,pmem=,args=' : '-ax -o pid=,ppid=,pcpu=,pmem=,command=';
+ 
+ 					// Set numeric locale to ensure '.' is used as the decimal separator
+ 					exec(`${ps} ${args}`, { maxBuffer: 1000 * 1024, env: { LC_NUMERIC: 'en_US.UTF-8' } }, (err, stdout, stderr) => {
+--- a/src/vs/platform/environment/node/userDataPath.ts
++++ b/src/vs/platform/environment/node/userDataPath.ts
+@@ -96,6 +96,7 @@
+ 			appDataPath = join(homedir(), 'Library', 'Application Support');
+ 			break;
+ 		case 'linux':
++		case 'sunos': // illumos: XDG layout as on Linux
+ 			appDataPath = process.env['XDG_CONFIG_HOME'] || join(homedir(), '.config');
+ 			break;
+ 		default:

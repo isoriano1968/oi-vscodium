@@ -1,0 +1,22 @@
+{
+    "dependencies": [
+        "SUNWcs",
+        "developer/versioning/git",
+        "file/gnu-coreutils",
+        "runtime/nodejs-24",
+        "service/security/kerberos-5",
+        "shell/bash",
+        "shell/ksh93",
+        "system/library",
+        "system/library/g++-14-runtime",
+        "system/library/gcc-14-runtime",
+        "system/library/math",
+        "system/library/security/gss",
+        "text/jq",
+        "text/ripgrep"
+    ],
+    "fmris": [
+        "editor/vscodium-server"
+    ],
+    "name": "vscodium-server"
+}

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=VS Code (OI)
+GenericName=Text Editor
+Comment=VSCodium served by this machine, in the web browser
+Exec=vscodium-web
+Icon=vscodium-web
+Terminal=false
+Categories=Development;IDE;TextEditor;
+Keywords=vscode;vscodium;code;editor;

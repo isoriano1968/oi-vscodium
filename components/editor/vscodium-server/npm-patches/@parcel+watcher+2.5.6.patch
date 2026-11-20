@@ -1,0 +1,483 @@
+@parcel/watcher on illumos: a new FEN backend (event ports, port_associate
+with PORT_SOURCE_FILE), used by default on solaris/illumos; legacy.cc uses
+S_ISDIR instead of d_type, which illumos' struct dirent lacks.
+Upstream: https://github.com/parcel-bundler/watcher (not sent yet)
+
+diff --git a/binding.gyp b/binding.gyp
+--- a/binding.gyp
++++ b/binding.gyp
+@@ -85,6 +85,20 @@
+             }
+           }
+         }],
++        ['OS=="solaris"', {
++          "sources": [
++            "src/watchman/BSER.cc",
++            "src/watchman/WatchmanBackend.cc",
++            "src/shared/BruteForceBackend.cc",
++            "src/unix/legacy.cc",
++            "src/fen/FenBackend.cc"
++          ],
++          "defines": [
++            "WATCHMAN",
++            "BRUTE_FORCE",
++            "FEN"
++          ]
++        }],
+         ['OS=="freebsd"', {
+           "sources": [
+             "src/watchman/BSER.cc",
+diff --git a/src/Backend.cc b/src/Backend.cc
+--- a/src/Backend.cc
++++ b/src/Backend.cc
+@@ -16,6 +16,9 @@
+ #ifdef __wasm32__
+ #include "wasm/WasmBackend.hh"
+ #endif
++#ifdef FEN
++#include "fen/FenBackend.hh"
++#endif
+ #include "shared/BruteForceBackend.hh"
+ 
+ #include "Backend.hh"
+@@ -56,6 +59,11 @@ std::shared_ptr<Backend> getBackend(std::string backend) {
+       return std::make_shared<KqueueBackend>();
+     }
+   #endif
++  #ifdef FEN
++    if (backend == "fen" || backend == "default") {
++      return std::make_shared<FenBackend>();
++    }
++  #endif
+   #ifdef __wasm32__
+     if (backend == "wasm" || backend == "default") {
+       return std::make_shared<WasmBackend>();
+diff --git a/src/fen/FenBackend.cc b/src/fen/FenBackend.cc
+new file mode 100644
+--- /dev/null
++++ b/src/fen/FenBackend.cc
+@@ -0,0 +1,350 @@
++#include <memory>
++#include <string.h>
++#include <unistd.h>
++#include <dirent.h>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include "FenBackend.hh"
++
++#define CONVERT_TIME(ts) ((uint64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)
++
++// The exceptional events are always reported, whether asked for or not.
++#define FEN_GONE (FILE_DELETE | FILE_RENAME_FROM | UNMOUNTED | MOUNTEDOVER)
++
++void FenBackend::start() {
++  if ((mPort = port_create()) == -1) {
++    throw std::runtime_error(std::string("Unable to create event port: ") + strerror(errno));
++  }
++
++  notifyStarted();
++
++  port_event_t events[128];
++
++  while (true) {
++    uint_t nget = 1;
++    if (port_getn(mPort, events, 128, &nget, NULL) == -1) {
++      if (errno == EINTR) {
++        continue;
++      }
++      throw std::runtime_error(std::string("port_getn error: ") + strerror(errno));
++    }
++
++    std::unordered_set<WatcherRef> watchers;
++    {
++      std::unique_lock<std::mutex> lock(mMutex);
++      for (uint_t i = 0; i < nget; i++) {
++        if (events[i].portev_source == PORT_SOURCE_USER) {
++          // The destructor asks the thread to end.
++          goto done;
++        }
++        if (events[i].portev_source != PORT_SOURCE_FILE) {
++          continue;
++        }
++        FenWatch *w = (FenWatch *)events[i].portev_user;
++        if (mLive.count(w) == 0) {
++          // Stopped watching it in the meantime: ignore the event.
++          continue;
++        }
++        handleEvent(w, events[i].portev_events, watchers);
++      }
++    }
++
++    for (auto it = watchers.begin(); it != watchers.end(); it++) {
++      (*it)->notify();
++    }
++  }
++
++done:
++  close(mPort);
++  mPort = -1;
++  mEndedSignal.notify();
++}
++
++FenBackend::~FenBackend() {
++  if (mPort != -1) {
++    port_send(mPort, 0, NULL);
++    mEndedSignal.wait();
++  }
++  for (auto it = mLive.begin(); it != mLive.end(); it++) {
++    delete *it;
++  }
++}
++
++// Called by Backend::watch, which holds mMutex.
++void FenBackend::subscribe(WatcherRef watcher) {
++  std::shared_ptr<DirTree> tree = getTree(watcher);
++
++  for (auto it = tree->entries.begin(); it != tree->entries.end(); it++) {
++    if (!watchPath(watcher, it->second.path, tree)) {
++      throw WatcherError(std::string("error watching " + watcher->mDir + ": " + strerror(errno)), watcher);
++    }
++  }
++}
++
++bool FenBackend::associate(FenWatch *w) {
++  struct stat st;
++  if (lstat(w->path.c_str(), &st) == -1) {
++    return false;
++  }
++  w->fobj.fo_atime = st.st_atim;
++  w->fobj.fo_mtime = st.st_mtim;
++  w->fobj.fo_ctime = st.st_ctim;
++  w->fobj.fo_name = (char *)w->path.c_str();
++  return port_associate(mPort, PORT_SOURCE_FILE, (uintptr_t)&w->fobj,
++                        FILE_MODIFIED | FILE_ATTRIB | FILE_NOFOLLOW, w) == 0;
++}
++
++bool FenBackend::watchPath(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree) {
++  if (watcher->isIgnored(path)) {
++    // Not an error: ignored paths are not watched.
++    return true;
++  }
++
++  DirEntry *entry = tree->find(path);
++  if (!entry) {
++    return false;
++  }
++
++  if (mWatches.count(path) == 0) {
++    FenWatch *w = new FenWatch();
++    w->path = path;
++    w->isDir = entry->isDir;
++    if (!associate(w)) {
++      int err = errno;
++      delete w;
++      errno = err;
++      // A file that went away between the scan and now is not an error.
++      return errno == ENOENT;
++    }
++    mWatches.emplace(path, w);
++    mLive.insert(w);
++  }
++
++  FenSubscription sub = {
++    .watcher = watcher,
++    .path = path,
++    .tree = tree
++  };
++  mSubscriptions.emplace(path, sub);
++  return true;
++}
++
++// Stops watching path and, if it was a directory, everything below it.
++// Both maps are sorted, so the entries below path follow path + "/".
++void FenBackend::forget(const std::string &path) {
++  std::string pathStart = path + DIR_SEP;
++
++  auto drop = [this](FenWatch *w) {
++    port_dissociate(mPort, PORT_SOURCE_FILE, (uintptr_t)&w->fobj);
++    mLive.erase(w);
++    delete w;
++  };
++  auto self = mWatches.find(path);
++  if (self != mWatches.end()) {
++    drop(self->second);
++    mWatches.erase(self);
++  }
++  for (auto it = mWatches.lower_bound(pathStart);
++       it != mWatches.end() && it->first.compare(0, pathStart.length(), pathStart) == 0;) {
++    drop(it->second);
++    it = mWatches.erase(it);
++  }
++
++  mSubscriptions.erase(path);
++  for (auto it = mSubscriptions.lower_bound(pathStart);
++       it != mSubscriptions.end() && it->first.compare(0, pathStart.length(), pathStart) == 0;) {
++    it = mSubscriptions.erase(it);
++  }
++}
++
++std::vector<FenSubscription *> FenBackend::findSubscriptions(const std::string &path) {
++  auto range = mSubscriptions.equal_range(path);
++  std::vector<FenSubscription *> subs;
++  for (auto it = range.first; it != range.second; it++) {
++    subs.push_back(&it->second);
++  }
++  return subs;
++}
++
++void FenBackend::handleEvent(FenWatch *w, int events, std::unordered_set<WatcherRef> &watchers) {
++  std::string path = w->path;
++
++  if (events & FEN_GONE) {
++    // Deleted or renamed away. The parent directory's event lists it too;
++    // compareDir then finds it already gone from the tree.
++    std::vector<FenSubscription *> subs = findSubscriptions(path);
++    for (auto it = subs.begin(); it != subs.end(); it++) {
++      FenSubscription *sub = *it;
++      watchers.insert(sub->watcher);
++      sub->watcher->mEvents.remove(path);
++      sub->tree->remove(path);
++    }
++    forget(path);
++    return;
++  }
++
++  if (w->isDir) {
++    if (events & FILE_MODIFIED) {
++      // Something in the directory changed: diff its entries.
++      compareDir(path, watchers);
++    }
++  } else if (events & (FILE_MODIFIED | FILE_ATTRIB | FILE_RENAME_TO)) {
++    struct stat st;
++    if (lstat(path.c_str(), &st) == 0) {
++      std::vector<FenSubscription *> subs = findSubscriptions(path);
++      for (auto it = subs.begin(); it != subs.end(); it++) {
++        FenSubscription *sub = *it;
++        DirEntry *entry = sub->tree->find(path);
++        if (entry && entry->mtime != CONVERT_TIME(st.st_mtim)) {
++          entry->mtime = CONVERT_TIME(st.st_mtim);
++          sub->watcher->mEvents.update(path);
++          watchers.insert(sub->watcher);
++        }
++      }
++    }
++  }
++
++  // The association fired and is gone: renew it.
++  if (mLive.count(w) && !associate(w)) {
++    std::vector<FenSubscription *> subs = findSubscriptions(path);
++    for (auto it = subs.begin(); it != subs.end(); it++) {
++      FenSubscription *sub = *it;
++      watchers.insert(sub->watcher);
++      sub->watcher->mEvents.remove(path);
++      sub->tree->remove(path);
++    }
++    forget(path);
++  }
++}
++
++// Adds path (just found in its parent directory) to the tree of each
++// subscription, reports it as created, watches it, and descends into new
++// directories, whose contents may have arrived with them (mv, mkdir -p).
++void FenBackend::addNew(const std::string &path, std::vector<FenSubscription *> &subs,
++                        std::shared_ptr<DirTree> tree, std::unordered_set<WatcherRef> &watchers) {
++  struct stat st;
++  if (lstat(path.c_str(), &st) == -1) {
++    return;
++  }
++  bool isDir = S_ISDIR(st.st_mode);
++  tree->add(path, CONVERT_TIME(st.st_mtim), isDir);
++
++  bool watched = false;
++  for (auto i = subs.begin(); i != subs.end(); i++) {
++    FenSubscription *sub = *i;
++    if (sub->tree != tree || sub->watcher->isIgnored(path)) {
++      continue;
++    }
++    sub->watcher->mEvents.create(path);
++    watchers.emplace(sub->watcher);
++    if (watchPath(sub->watcher, path, sub->tree)) {
++      watched = true;
++    }
++  }
++
++  if (!watched) {
++    tree->remove(path);
++    return;
++  }
++
++  if (isDir) {
++    DIR *dir = opendir(path.c_str());
++    if (dir == NULL) {
++      return;
++    }
++    std::vector<std::string> children;
++    struct dirent *ent;
++    while ((ent = readdir(dir))) {
++      if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
++        continue;
++      }
++      children.push_back(path + DIR_SEP + ent->d_name);
++    }
++    closedir(dir);
++    for (auto c = children.begin(); c != children.end(); c++) {
++      if (!tree->find(*c)) {
++        addNew(*c, subs, tree, watchers);
++      }
++    }
++  }
++}
++
++void FenBackend::compareDir(const std::string &path, std::unordered_set<WatcherRef> &watchers) {
++  DIR *dir = opendir(path.c_str());
++  if (dir == NULL) {
++    return;
++  }
++
++  std::vector<FenSubscription *> subs = findSubscriptions(path);
++  std::string dirStart = path + DIR_SEP;
++
++  std::unordered_set<std::shared_ptr<DirTree>> trees;
++  for (auto it = subs.begin(); it != subs.end(); it++) {
++    trees.emplace((*it)->tree);
++  }
++
++  std::unordered_set<std::string> entries;
++  struct dirent *ent;
++  while ((ent = readdir(dir))) {
++    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
++      continue;
++    }
++    entries.emplace(dirStart + ent->d_name);
++  }
++  closedir(dir);
++
++  for (auto t = trees.begin(); t != trees.end(); t++) {
++    std::shared_ptr<DirTree> tree = *t;
++
++    for (auto e = entries.begin(); e != entries.end(); e++) {
++      if (!tree->find(*e)) {
++        addNew(*e, subs, tree, watchers);
++      }
++    }
++
++    std::vector<std::string> gone;
++    for (auto entry = tree->entries.begin(); entry != tree->entries.end(); entry++) {
++      if (entry->first.rfind(dirStart, 0) == 0 &&
++          entry->first.find(DIR_SEP, dirStart.length()) == std::string::npos &&
++          entries.count(entry->first) == 0) {
++        gone.push_back(entry->first);
++      }
++    }
++    for (auto g = gone.begin(); g != gone.end(); g++) {
++      for (auto i = subs.begin(); i != subs.end(); i++) {
++        FenSubscription *sub = *i;
++        if (sub->tree == tree && !sub->watcher->isIgnored(*g)) {
++          sub->watcher->mEvents.remove(*g);
++          watchers.emplace(sub->watcher);
++        }
++      }
++      tree->remove(*g);
++      forget(*g);
++    }
++  }
++}
++
++// Called by Backend::unwatch, which holds mMutex.
++void FenBackend::unsubscribe(WatcherRef watcher) {
++  std::vector<std::string> unwatched;
++  for (auto it = mSubscriptions.begin(); it != mSubscriptions.end();) {
++    if (it->second.watcher.get() == watcher.get()) {
++      std::string path = it->first;
++      it = mSubscriptions.erase(it);
++      if (mSubscriptions.count(path) == 0) {
++        unwatched.push_back(path);
++      }
++    } else {
++      it++;
++    }
++  }
++  for (auto p = unwatched.begin(); p != unwatched.end(); p++) {
++    auto w = mWatches.find(*p);
++    if (w != mWatches.end()) {
++      port_dissociate(mPort, PORT_SOURCE_FILE, (uintptr_t)&w->second->fobj);
++      mLive.erase(w->second);
++      delete w->second;
++      mWatches.erase(w);
++    }
++  }
++}
+diff --git a/src/fen/FenBackend.hh b/src/fen/FenBackend.hh
+new file mode 100644
+--- /dev/null
++++ b/src/fen/FenBackend.hh
+@@ -0,0 +1,53 @@
++#ifndef FEN_H
++#define FEN_H
++
++#include <map>
++#include <unordered_map>
++#include <unordered_set>
++#include <port.h>
++#include "../shared/BruteForceBackend.hh"
++#include "../DirTree.hh"
++#include "../Signal.hh"
++
++// One file events notification (FEN) association, shared by all
++// subscriptions that watch the same path. fobj.fo_name points into path.
++struct FenWatch {
++  std::string path;
++  bool isDir;
++  file_obj_t fobj;
++};
++
++struct FenSubscription {
++  WatcherRef watcher;
++  std::string path;
++  std::shared_ptr<DirTree> tree;
++};
++
++// illumos and Solaris backend: event ports with PORT_SOURCE_FILE, see
++// port_associate(3C). An association fires once and is renewed after each
++// event; the stat times stored in file_obj_t make a change between the event
++// and the renewal fire at once.
++class FenBackend : public BruteForceBackend {
++public:
++  void start() override;
++  ~FenBackend();
++  void subscribe(WatcherRef watcher) override;
++  void unsubscribe(WatcherRef watcher) override;
++private:
++  int mPort = -1;
++  std::multimap<std::string, FenSubscription> mSubscriptions;
++  std::map<std::string, FenWatch *> mWatches;
++  std::unordered_set<FenWatch *> mLive;
++  Signal mEndedSignal;
++
++  bool watchPath(WatcherRef watcher, const std::string &path, std::shared_ptr<DirTree> tree);
++  bool associate(FenWatch *w);
++  void forget(const std::string &path);
++  void handleEvent(FenWatch *w, int events, std::unordered_set<WatcherRef> &watchers);
++  void compareDir(const std::string &path, std::unordered_set<WatcherRef> &watchers);
++  void addNew(const std::string &path, std::vector<FenSubscription *> &subs,
++              std::shared_ptr<DirTree> tree, std::unordered_set<WatcherRef> &watchers);
++  std::vector<FenSubscription *> findSubscriptions(const std::string &path);
++};
++
++#endif
+diff --git a/src/unix/legacy.cc b/src/unix/legacy.cc
+--- a/src/unix/legacy.cc
++++ b/src/unix/legacy.cc
+@@ -48,7 +48,12 @@ void iterateDir(WatcherRef watcher, const std::shared_ptr <DirTree> tree, const
+             if (!watcher->isIgnored(fullPath)) {
+                 struct stat attrib;
+                 fstatat(new_fd, ent->d_name, &attrib, AT_SYMLINK_NOFOLLOW);
++#if defined(__sun)
++                // illumos and Solaris have no d_type in struct dirent.
++                bool isDir = S_ISDIR(attrib.st_mode);
++#else
+                 bool isDir = ent->d_type == DT_DIR;
++#endif
+ 
+                 if (isDir) {
+                     iterateDir(watcher, tree, ent->d_name, new_fd, fullPath);

@@ -1,0 +1,62 @@
+#!/usr/bin/bash
+#
+# This file and its contents are supplied under the terms of the
+# Common Development and Distribution License ("CDDL"), version 1.0.
+# You may only use this file in accordance with the terms of version
+# 1.0 of the CDDL.
+#
+# A full copy of the text of the CDDL should have accompanied this
+# source.  A copy of the CDDL is also available via the Internet at
+# http://www.illumos.org/license/CDDL.
+#
+# Copyright 2026 isoriano1968
+#
+# vscodium-web [folder]: start this user's VSCodium server on 127.0.0.1 (or
+# reuse the running one) and open the editor in the web browser.
+#   VSCODIUM_WEB_PORT  port (default 8800)
+#   BROWSER            browser command (default firefox)
+
+SERVER=/usr/lib/vscodium-server/bin/codium-server
+port=${VSCODIUM_WEB_PORT:-8800}
+data=$HOME/.vscodium-server
+token=$data/web-token
+pidfile=$data/web-server.pid
+log=$data/web-server.log
+
+mkdir -p "$data" && chmod 700 "$data" || exit 1
+
+# The connection token: only who can read it can use the server.
+if [[ ! -s $token ]]; then
+	( umask 077; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$token" ) || exit 1
+fi
+
+running() {
+	[[ -s $pidfile ]] || return 1
+	local pid
+	pid=$(<"$pidfile")
+	kill -0 "$pid" 2>/dev/null && ps -o args= -p "$pid" | grep -q server-main
+}
+
+if ! running; then
+	: > "$log"
+	nohup "$SERVER" --host 127.0.0.1 --port "$port" \
+	    --connection-token-file "$token" --accept-server-license-terms \
+	    --telemetry-level off > "$log" 2>&1 < /dev/null &
+	echo $! > "$pidfile"
+	for (( i = 0; i < 60; i++ )); do
+		grep -q 'Extension host agent listening' "$log" && break
+		if ! kill -0 "$(<"$pidfile")" 2>/dev/null; then
+			echo "vscodium-web: the server did not start; see $log" >&2
+			exit 1
+		fi
+		sleep 0.5
+	done
+fi
+
+url="http://127.0.0.1:$port/?tkn=$(<"$token")"
+if [[ -n $1 ]]; then
+	folder=$(cd "$1" 2>/dev/null && pwd) || { echo "vscodium-web: no such folder: $1" >&2; exit 1; }
+	url="$url&folder=$folder"
+fi
+
+exec ${BROWSER:-firefox} "$url"

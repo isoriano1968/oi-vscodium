@@ -1,0 +1,35 @@
+undo_telemetry.sh runs @vscode/ripgrep's rg, which has no binary for some build
+hosts (illumos); use the system's rg there.
+Upstream: https://github.com/VSCodium/vscodium (not sent yet)
+
+--- a/undo_telemetry.sh
++++ b/undo_telemetry.sh
+@@ -26,18 +26,25 @@
+ fi
+ export -f replace_with_debug
+ 
++# @vscode/ripgrep downloads no binary where it has none (e.g. illumos): use the
++# system's rg then.
++RG=./node_modules/@vscode/ripgrep/bin/rg
++if [[ ! -x "${RG}" ]] && command -v rg >/dev/null 2>&1; then
++  RG=rg
++fi
++
+ d1=$( date +%s )
+ 
+ if [[ "${OS_NAME}" == "linux" ]]; then
+   if [[ ${VSCODE_ARCH} == "x64" ]]; then
+-    ./node_modules/@vscode/ripgrep/bin/rg --no-ignore -l "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
++    "${RG}" --no-ignore -l "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
+   else
+     grep -rl --exclude-dir=.git -E "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
+   fi
+ elif [[ "${OS_NAME}" == "osx" ]]; then
+-  ./node_modules/@vscode/ripgrep/bin/rg --no-ignore -l "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
++  "${RG}" --no-ignore -l "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
+ else
+-  ./node_modules/@vscode/ripgrep/bin/rg --no-ignore --path-separator=// -l "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
++  "${RG}" --no-ignore --path-separator=// -l "${SEARCH}" . | xargs -I {} bash -c 'replace_with_debug "${1}" "{}"' _ "${REPLACEMENT}"
+ fi
+ 
+ d2=$( date +%s )

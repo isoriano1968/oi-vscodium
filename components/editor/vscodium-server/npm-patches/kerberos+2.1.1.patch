@@ -1,0 +1,72 @@
+kerberos on illumos: the unix GSSAPI code with illumos' headers (gssapi.h,
+gssapi_ext.h, kerberosv5/krb5.h), linked with -lgss -lkrb5.
+Upstream: https://github.com/mongodb-js/kerberos (not sent yet)
+
+diff --git a/binding.gyp b/binding.gyp
+--- a/binding.gyp
++++ b/binding.gyp
+@@ -54,6 +54,24 @@
+             ]
+           }
+         }],
++        ['OS=="solaris"', {
++          # illumos: libgss and libkrb5 are part of the base system, so link
++          # them directly (the dlopen() path knows only the MIT library names).
++          'sources': [
++            'src/unix/base64.cc',
++            'src/unix/kerberos_gss.cc',
++            'src/unix/kerberos_unix.cc'
++          ],
++          'include_dirs': [
++            '/usr/include/kerberosv5'
++          ],
++          'link_settings': {
++            'libraries': [
++              '-lgss',
++              '-lkrb5'
++            ]
++          }
++        }],
+         ['OS=="mac" or OS=="linux"', {
+           'sources': [
+             'src/unix/base64.cc',
+diff --git a/src/kerberos_common.h b/src/kerberos_common.h
+--- a/src/kerberos_common.h
++++ b/src/kerberos_common.h
+@@ -1,7 +1,7 @@
+ #ifndef KERBEROS_COMMON_H
+ #define KERBEROS_COMMON_H
+ 
+-#if defined(__linux__) || defined(__APPLE__)
++#if defined(__linux__) || defined(__APPLE__) || defined(__sun)
+ #include "unix/kerberos_gss.h"
+ 
+ namespace node_kerberos {
+diff --git a/src/unix/kerberos_gss.h b/src/unix/kerberos_gss.h
+--- a/src/unix/kerberos_gss.h
++++ b/src/unix/kerberos_gss.h
+@@ -18,11 +18,24 @@
+ #define KERBEROS_GSS_H
+ 
+ extern "C" {
++#if defined(__sun)
++    /* illumos: GSS-API in libgss, Kerberos in libkrb5 (kerberosv5/krb5.h) */
++    #include <gssapi/gssapi.h>
++    #include <gssapi/gssapi_ext.h>
++    #include <krb5.h>
++    #include <com_err.h>
++#else
+     #include <gssapi/gssapi.h>
+     #include <gssapi/gssapi_generic.h>
+     #include <gssapi/gssapi_krb5.h>
++#endif
+ }
+ 
++#if defined(__sun) && !defined(gss_nt_service_name)
++/* the old MIT name of the host-based service name type */
++#define gss_nt_service_name GSS_C_NT_HOSTBASED_SERVICE
++#endif
++
+ #include <string>
+ 
+ namespace node_kerberos {

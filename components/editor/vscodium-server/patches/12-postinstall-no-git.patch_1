@@ -1,0 +1,42 @@
+postinstall runs `git config` twice; a release tarball (what distribution
+packages build from) has no .git, and the command fails there. Run it only in a
+git checkout.
+Upstream: https://github.com/microsoft/vscode (not sent yet)
+
+--- a/build/npm/postinstall.ts
++++ b/build/npm/postinstall.ts
+@@ -239,14 +239,22 @@
+ 	}
+ }
+ 
++// A release tarball (as used by distribution packages) has no .git.
++function configureGit() {
++	if (!fs.existsSync(path.join(root, '.git'))) {
++		return;
++	}
++	child_process.execSync('git config pull.rebase merges');
++	child_process.execSync('git config blame.ignoreRevsFile .git-blame-ignore-revs');
++}
++
+ async function main() {
+ 	await ensureElectronTypes();
+ 
+ 	if (!process.env['VSCODE_FORCE_INSTALL'] && isUpToDate()) {
+ 		finishCloudSandbox();
+ 		log('.', 'All dependencies up to date, skipping postinstall.');
+-		child_process.execSync('git config pull.rebase merges');
+-		child_process.execSync('git config blame.ignoreRevsFile .git-blame-ignore-revs');
++		configureGit();
+ 		return;
+ 	}
+ 
+@@ -318,8 +326,7 @@
+ 	log('.', `Running ${parallelTasks.length} npm installs with concurrency ${concurrency}...`);
+ 	await runWithConcurrency(parallelTasks, concurrency);
+ 
+-	child_process.execSync('git config pull.rebase merges');
+-	child_process.execSync('git config blame.ignoreRevsFile .git-blame-ignore-revs');
++	configureGit();
+ 
+ 	finishCloudSandbox();
+ 

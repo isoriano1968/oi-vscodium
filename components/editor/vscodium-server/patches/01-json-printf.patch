@@ -1,0 +1,35 @@
+Write JSON with printf, not echo. Where bash has xpg_echo on by default (Solaris
+and illumos build it that way), echo turns the \\ of escaped regexes in
+product.json into \, and the file is no longer JSON (Node: "Bad escaped
+character").
+Upstream: https://github.com/VSCodium/vscodium (not sent yet)
+
+--- a/prepare_vscode.sh
++++ b/prepare_vscode.sh
+@@ -22,7 +22,7 @@
+   local jsonTmp
+   { set +x; } 2>/dev/null
+   jsonTmp=$( jq --arg 'value' "${3}" "setpath(path(.${2}); \$value)" "${1}.json" )
+-  echo "${jsonTmp}" > "${1}.json"
++  printf '%s\n' "${jsonTmp}" > "${1}.json"
+   set -x
+ }
+ 
+@@ -30,7 +30,7 @@
+   local jsonTmp
+   { set +x; } 2>/dev/null
+   jsonTmp=$( jq --argjson 'value' "${3}" "setpath(path(.${2}); \$value)" "${1}.json" )
+-  echo "${jsonTmp}" > "${1}.json"
++  printf '%s\n' "${jsonTmp}" > "${1}.json"
+   set -x
+ }
+ 
+@@ -124,7 +124,7 @@
+ setpath_json "product" "tunnelApplicationConfig" '{}'
+ 
+ jsonTmp=$( jq -s '.[0] * .[1]' product.json ../product.json )
+-echo "${jsonTmp}" > product.json && unset jsonTmp
++printf '%s\n' "${jsonTmp}" > product.json && unset jsonTmp
+ 
+ cat product.json
+ # }}}

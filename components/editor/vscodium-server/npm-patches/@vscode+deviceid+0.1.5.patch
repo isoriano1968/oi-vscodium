@@ -1,0 +1,28 @@
+@vscode/deviceid: accept sunos (the device id is stored like on Linux).
+Upstream: https://github.com/microsoft/vscode-deviceid (not sent yet)
+
+diff --git a/dist/index.js b/dist/index.js
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -21,7 +21,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
+ if (process.platform !== "win32" &&
+     process.platform !== "darwin" &&
+     process.platform !== "linux" &&
+-    process.platform !== "freebsd") {
++    process.platform !== "freebsd" &&
++    process.platform !== "sunos") {
+     throw new Error("Unsupported platform");
+ }
+ __exportStar(require("./devdeviceid.js"), exports);
+diff --git a/dist/storage.js b/dist/storage.js
+--- a/dist/storage.js
++++ b/dist/storage.js
+@@ -42,7 +42,7 @@ function getDirectory() {
+     if (process.platform === "darwin") {
+         folder = path.join(process.env.HOME, "Library", "Application Support");
+     }
+-    else if (process.platform === "linux" || process.platform === "freebsd") {
++    else if (process.platform === "linux" || process.platform === "freebsd" || process.platform === "sunos") {
+         folder =
+             process.env.XDG_CACHE_HOME ?? path.join(process.env.HOME, ".cache");
+     }

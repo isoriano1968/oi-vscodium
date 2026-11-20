@@ -1,0 +1,386 @@
+node-pty on illumos: illumos libc has no openpty/forkpty, so they are built
+from posix_openpt + the ptem/ldterm/ttcompat STREAMS modules; libuv rejects a
+pty master as a tty (EINVAL), so a socketpair relays it; the foreground
+process comes from ioctl(TIOCGPGRP) and /proc/<pgrp>/psinfo.
+Upstream: https://github.com/microsoft/node-pty (not sent yet)
+
+diff --git a/lib/unixTerminal.js b/lib/unixTerminal.js
+--- a/lib/unixTerminal.js
++++ b/lib/unixTerminal.js
+@@ -24,6 +24,7 @@ exports.UnixTerminal = void 0;
+ var fs = require("fs");
+ var path = require("path");
+ var tty = require("tty");
++var net = require("net");
+ var terminal_1 = require("./terminal");
+ var utils_1 = require("./utils");
+ var native = (0, utils_1.loadNativeModule)('pty');
+@@ -92,7 +93,9 @@ var UnixTerminal = /** @class */ (function (_super) {
+         };
+         // fork
+         var term = pty.fork(file, args, parsedEnv, cwd, _this._cols, _this._rows, uid, gid, (encoding === 'utf8'), helperPath, onexit);
+-        _this._socket = new tty.ReadStream(term.fd);
++        // illumos: term.fd is a socket that the native relay connects to the
++        // pty master, which libuv cannot open as a tty (see pty.cc).
++        _this._socket = process.platform === 'sunos' ? new net.Socket({ fd: term.fd, readable: true, writable: false }) : new tty.ReadStream(term.fd);
+         if (encoding !== null) {
+             _this._socket.setEncoding(encoding);
+         }
+diff --git a/src/unix/pty.cc b/src/unix/pty.cc
+--- a/src/unix/pty.cc
++++ b/src/unix/pty.cc
+@@ -47,6 +47,14 @@
+ #elif defined(__OpenBSD__)
+ #include <util.h>
+ #include <termios.h>
++#elif defined(__sun)
++/* illumos: no openpty(3)/forkpty(3) in libc, see pty_openpty() below */
++#include <stropts.h>
++#include <termios.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <map>
++#include <mutex>
+ #endif
+ 
+ /* Some platforms name VWERASE and VDISCARD differently */
+@@ -61,6 +69,9 @@
+ #if defined(__linux__)
+ #include <stdio.h>
+ #include <stdint.h>
++#elif defined(__sun)
++#include <stdio.h>
++#include <procfs.h>
+ #elif defined(__APPLE__)
+ #include <libproc.h>
+ #include <os/availability.h>
+@@ -112,6 +123,219 @@ struct ExitEvent {
+   int exit_code = 0, signal_code = 0;
+ };
+ 
++#if defined(__sun)
++static int
++pty_nonblock(int);
++
++/**
++ * illumos has no openpty(3) or forkpty(3). Build them from posix_openpt(3C),
++ * grantpt(3C), unlockpt(3C) and ptsname(3C), as in the pts(4D) manual page.
++ */
++static int
++pty_openpty(int *amaster, int *aslave, char *name, size_t namelen,
++            const struct termios *termp, const struct winsize *winp) {
++  int master, slave, err;
++  const char *slavename;
++
++  if ((master = posix_openpt(O_RDWR | O_NOCTTY)) == -1)
++    return -1;
++  if (grantpt(master) == -1 || unlockpt(master) == -1 ||
++      (slavename = ptsname(master)) == NULL)
++    goto fail;
++  if (name != NULL && strlcpy(name, slavename, namelen) >= namelen) {
++    errno = ENAMETOOLONG;
++    goto fail;
++  }
++  if ((slave = open(slavename, O_RDWR | O_NOCTTY)) == -1)
++    goto fail;
++  /* Push the terminal STREAMS modules unless they are already there. */
++  if (ioctl(slave, I_FIND, "ldterm") == 0 &&
++      (ioctl(slave, I_PUSH, "ptem") == -1 ||
++       ioctl(slave, I_PUSH, "ldterm") == -1 ||
++       ioctl(slave, I_PUSH, "ttcompat") == -1)) {
++    err = errno;
++    close(slave);
++    errno = err;
++    goto fail;
++  }
++  if ((termp != NULL && tcsetattr(slave, TCSAFLUSH, termp) == -1) ||
++      (winp != NULL && ioctl(slave, TIOCSWINSZ, winp) == -1)) {
++    err = errno;
++    close(slave);
++    errno = err;
++    goto fail;
++  }
++  *amaster = master;
++  *aslave = slave;
++  return 0;
++
++fail:
++  err = errno;
++  close(master);
++  errno = err;
++  return -1;
++}
++
++static pid_t
++pty_forkpty(int *amaster, const struct termios *termp,
++            const struct winsize *winp) {
++  int master, slave, fd;
++  char name[64];
++  pid_t pid;
++
++  if (pty_openpty(&master, &slave, name, sizeof (name), termp, winp) == -1)
++    return -1;
++
++  switch (pid = fork()) {
++    case -1:
++      close(master);
++      close(slave);
++      return -1;
++    case 0:
++      close(master);
++      if (setsid() == -1)
++        _exit(1);
++      /*
++       * The first terminal that a session leader opens without O_NOCTTY
++       * becomes its controlling terminal.
++       */
++      if ((fd = open(name, O_RDWR)) == -1)
++        _exit(1);
++      close(fd);
++      if (dup2(slave, STDIN_FILENO) == -1 ||
++          dup2(slave, STDOUT_FILENO) == -1 ||
++          dup2(slave, STDERR_FILENO) == -1)
++        _exit(1);
++      if (slave > STDERR_FILENO)
++        close(slave);
++      return 0;
++    default:
++      close(slave);
++      *amaster = master;
++      return pid;
++  }
++}
++
++/* Close all file descriptors >= 3 in the child before exec. */
++static void
++pty_close_inherited_fds() {
++  closefrom(3);
++}
++
++/*
++ * The master side of an illumos pty is a STREAMS device without the terminal
++ * modules, so isatty(3C) is false for it and libuv's uv_tty_init() (which
++ * tty.ReadStream uses) rejects it with EINVAL. JavaScript therefore gets one
++ * end of a socket pair, and a relay thread copies between the other end and
++ * the master. pty_relay_master maps the JavaScript fd to the master fd for
++ * resize() and process().
++ */
++static std::mutex pty_relay_mutex;
++static std::map<int, int> pty_relay_master;
++
++static int
++pty_master_fd(int fd) {
++  std::lock_guard<std::mutex> lock(pty_relay_mutex);
++  auto it = pty_relay_master.find(fd);
++  return it == pty_relay_master.end() ? fd : it->second;
++}
++
++struct pty_relay_dir {
++  int from, to;
++  char buf[16384];
++  size_t len, off;
++  bool eof;
++};
++
++static void
++pty_relay(int jsfd, int master, int sock) {
++  struct pty_relay_dir d[2] = {
++    { master, sock, {0}, 0, 0, false },  /* output of the child */
++    { sock, master, {0}, 0, 0, false }   /* input from JavaScript */
++  };
++
++  for (;;) {
++    struct pollfd pfd[2];
++    pfd[0].fd = master;
++    pfd[1].fd = sock;
++    pfd[0].events = pfd[1].events = 0;
++    /* read when the buffer is empty, write when it holds data */
++    if (d[0].len == 0 && !d[0].eof) pfd[0].events |= POLLIN;
++    if (d[1].len > 0) pfd[0].events |= POLLOUT;
++    if (d[1].len == 0 && !d[1].eof) pfd[1].events |= POLLIN;
++    if (d[0].len > 0) pfd[1].events |= POLLOUT;
++
++    /* the child is gone and its output is delivered, or JavaScript closed */
++    if ((d[0].eof && d[0].len == 0) || d[1].eof)
++      break;
++
++    if (poll(pfd, 2, -1) == -1) {
++      if (errno == EINTR) continue;
++      break;
++    }
++
++    bool failed = false;
++    for (int i = 0; i < 2; i++) {
++      struct pty_relay_dir *r = &d[i];
++      struct pollfd *in = &pfd[i == 0 ? 0 : 1];
++      struct pollfd *out = &pfd[i == 0 ? 1 : 0];
++
++      if (r->len == 0 && !r->eof && (in->revents & (POLLIN | POLLHUP | POLLERR))) {
++        ssize_t n = read(r->from, r->buf, sizeof (r->buf));
++        if (n > 0) {
++          r->len = (size_t)n;
++          r->off = 0;
++        } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
++          /* EOF, or EIO once the last process on the slave side exits */
++          r->eof = true;
++        }
++      }
++      if (r->len > 0 && (out->revents & (POLLOUT | POLLHUP | POLLERR))) {
++        ssize_t n = write(r->to, r->buf + r->off, r->len - r->off);
++        if (n > 0) {
++          r->off += (size_t)n;
++          if (r->off == r->len) r->len = r->off = 0;
++        } else if (n == -1 && errno != EAGAIN && errno != EINTR) {
++          failed = true;
++        }
++      }
++    }
++    if (failed)
++      break;
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(pty_relay_mutex);
++    pty_relay_master.erase(jsfd);
++  }
++  /* closing sock ends the JavaScript stream; closing master hangs up the slave */
++  close(sock);
++  close(master);
++}
++
++/* Gives JavaScript a socket for the master and starts the relay thread. */
++static int
++pty_relay_start(int master) {
++  int sv[2];
++  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == -1)
++    return -1;
++  if (pty_nonblock(master) == -1 || pty_nonblock(sv[1]) == -1 ||
++      fcntl(sv[0], F_SETFD, FD_CLOEXEC) == -1 ||
++      fcntl(sv[1], F_SETFD, FD_CLOEXEC) == -1 ||
++      fcntl(master, F_SETFD, FD_CLOEXEC) == -1) {
++    close(sv[0]);
++    close(sv[1]);
++    return -1;
++  }
++  {
++    std::lock_guard<std::mutex> lock(pty_relay_mutex);
++    pty_relay_master[sv[0]] = master;
++  }
++  std::thread(pty_relay, sv[0], master, sv[1]).detach();
++  return sv[0];
++}
++#endif
++
+ #if defined(__linux__)
+ 
+ static int
+@@ -436,7 +660,11 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+   sigfillset(&newmask);
+   pthread_sigmask(SIG_SETMASK, &newmask, &oldmask);
+ 
++#if defined(__sun)
++  pid = pty_forkpty(&master, static_cast<termios*>(term), static_cast<winsize*>(&winp));
++#else
+   pid = forkpty(&master, nullptr, static_cast<termios*>(term), static_cast<winsize*>(&winp));
++#endif
+ 
+   if (!pid) {
+     // remove all signal handler from child
+@@ -492,9 +720,20 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+ #endif
+ 
+   Napi::Object obj = Napi::Object::New(napiEnv);
++#if defined(__sun)
++  obj.Set("pty", Napi::String::New(napiEnv, ptsname(master)));
++  int jsfd = pty_relay_start(master);
++  if (jsfd == -1) {
++    close(master);
++    throw Napi::Error::New(napiEnv, "Could not start the pty relay.");
++  }
++  obj.Set("fd", Napi::Number::New(napiEnv, jsfd));
++  obj.Set("pid", Napi::Number::New(napiEnv, pid));
++#else
+   obj.Set("fd", Napi::Number::New(napiEnv, master));
+   obj.Set("pid", Napi::Number::New(napiEnv, pid));
+   obj.Set("pty", Napi::String::New(napiEnv, ptsname(master)));
++#endif
+ 
+   // Set up process exit callback.
+   Napi::Function cb = info[10].As<Napi::Function>();
+@@ -521,7 +760,11 @@ Napi::Value PtyOpen(const Napi::CallbackInfo& info) {
+ 
+   // pty
+   int master, slave;
++#if defined(__sun)
++  int ret = pty_openpty(&master, &slave, nullptr, 0, NULL, static_cast<winsize*>(&winp));
++#else
+   int ret = openpty(&master, &slave, nullptr, NULL, static_cast<winsize*>(&winp));
++#endif
+ 
+   if (ret == -1) {
+     throw Napi::Error::New(env, "openpty(3) failed.");
+@@ -557,6 +800,9 @@ Napi::Value PtyResize(const Napi::CallbackInfo& info) {
+   }
+ 
+   int fd = info[0].As<Napi::Number>().Int32Value();
++#if defined(__sun)
++  fd = pty_master_fd(fd);
++#endif
+ 
+   struct winsize winp;
+   winp.ws_col = info[1].As<Napi::Number>().Int32Value();
+@@ -604,6 +850,9 @@ Napi::Value PtyGetProc(const Napi::CallbackInfo& info) {
+   }
+ 
+   int fd = info[0].As<Napi::Number>().Int32Value();
++#if defined(__sun)
++  fd = pty_master_fd(fd);
++#endif
+ 
+   std::string tty_ = info[1].As<Napi::String>();
+   char *tty = strdup(tty_.c_str());
+@@ -719,6 +968,44 @@ pty_getproc(int fd) {
+   return strdup(kp.kp_proc.p_comm);
+ }
+ 
++#elif defined(__sun)
++
++/*
++ * illumos: the name of the foreground process group leader, from
++ * /proc/<pgrp>/psinfo. tcgetpgrp(3C) fails with ENOTTY on the master side and
++ * on a slave that is not our controlling terminal, but the TIOCGPGRP ioctl on
++ * the slave named by tty answers.
++ */
++static char *
++pty_getproc(int fd, char *tty) {
++  char path[64];
++  psinfo_t psinfo;
++  pid_t pgrp;
++  ssize_t n;
++  int pfd, sfd, r;
++
++  if (tty == NULL || (sfd = open(tty, O_RDONLY | O_NOCTTY | O_NONBLOCK)) == -1) {
++    return NULL;
++  }
++  r = ioctl(sfd, TIOCGPGRP, &pgrp);
++  close(sfd);
++  if (r == -1) {
++    return NULL;
++  }
++
++  snprintf(path, sizeof (path), "/proc/%d/psinfo", (int)pgrp);
++  if ((pfd = open(path, O_RDONLY)) == -1) {
++    return NULL;
++  }
++  n = read(pfd, &psinfo, sizeof (psinfo));
++  close(pfd);
++  if (n != (ssize_t)sizeof (psinfo) || psinfo.pr_fname[0] == '\0') {
++    return NULL;
++  }
++
++  return strdup(psinfo.pr_fname);
++}
++
+ #else
+ 
+ static char *

@@ -1,0 +1,120 @@
+illumos (process.platform 'sunos'): the desktop editor takes the Linux branches
+in its startup (src/mainImpl.ts, src/bootstrap-node.ts) and the update service
+(electron-main/app.ts), as FreeBSD's editors/vscode does for 'freebsd'
+(https://github.com/freebsd/freebsd-ports/tree/main/editors/vscode/files).
+The build takes our Electron (developer/electron-43) from the download cache,
+so the release checksums are off (build/lib/electron.ts, as FreeBSD).
+The launcher checks /proc/version (WSL) only where it exists, and exports
+IBUS_ENABLE_SYNC_MODE=1 (ibus-gtk3's async mode loses the keys on illumos).
+
+--- a/build/lib/electron.ts	2026-11-18 08:33:07.070282949 +0100
++++ b/build/lib/electron.ts	2026-11-18 08:33:07.070282949 +0100
+@@ -240,7 +240,10 @@
+ 	winIcon: 'resources/win32/code.ico',
+ 	token: process.env['GITHUB_TOKEN'],
+ 	repo: electronAssetResolver,
+-	validateChecksum: true,
++	// Our own Electron build (developer/electron-43) stands in for the
++	// download: its checksums are not the release's.
++	validateChecksum: false,
++	unsafelyDisableChecksums: true,
+ 	checksumFile: path.join(root, 'build', 'checksums', 'electron.txt'),
+ 	createVersionedResources: useVersionedUpdate,
+ 	productVersionString: versionedResourcesFolder,
+--- a/src/bootstrap-node.ts	2026-11-18 08:33:07.062282938 +0100
++++ b/src/bootstrap-node.ts	2026-11-18 08:33:07.062282938 +0100
+@@ -13,7 +13,7 @@
+ const isWindows = process.platform === 'win32';
+ 
+ // Avoid 64 KiB pooled backing stores crossing Mojo's shared-memory threshold.
+-if (process.platform === 'linux') {
++if ((process.platform === 'linux' || process.platform === 'sunos')) {
+ 	Buffer.poolSize = 8 * 1024;
+ }
+ 
+@@ -227,7 +227,7 @@
+ 			return process.env['VSCODE_PORTABLE'];
+ 		}
+ 
+-		if (process.platform === 'win32' || process.platform === 'linux') {
++		if (process.platform === 'win32' || (process.platform === 'linux' || process.platform === 'sunos')) {
+ 			return path.join(getApplicationPath(), 'data');
+ 		}
+ 
+--- a/src/mainImpl.ts	2026-11-18 08:33:07.058282932 +0100
++++ b/src/mainImpl.ts	2026-11-18 08:33:07.058282932 +0100
+@@ -67,7 +67,7 @@
+ app.setPath('userData', userDataPath);
+ perf.mark('code/didGetUserDataPath');
+ 
+-if (process.platform === 'linux') {
++if ((process.platform === 'linux' || process.platform === 'sunos')) {
+ 	const snapName = process.env['SNAP_INSTANCE_NAME'];
+ 	const installedDesktopName = product.linuxDesktopName && `/usr/share/applications/${product.linuxDesktopName}.desktop`;
+ 	if (snapName) {
+@@ -168,7 +168,7 @@
+ // Pseudo Language Language Pack is being used.
+ // In that case, use `en` as the Electron locale.
+ 
+-if (process.platform === 'win32' || process.platform === 'linux') {
++if (process.platform === 'win32' || (process.platform === 'linux' || process.platform === 'sunos')) {
+ 	const electronLocale = (!userLocale || userLocale === 'qps-ploc') ? 'en' : userLocale;
+ 	app.commandLine.appendSwitch('lang', electronLocale);
+ }
+@@ -266,7 +266,7 @@
+ 		'remote-debugging-port'
+ 	];
+ 
+-	if (process.platform === 'linux') {
++	if ((process.platform === 'linux' || process.platform === 'sunos')) {
+ 
+ 		// Force enable screen readers on Linux via this flag
+ 		SUPPORTED_ELECTRON_SWITCHES.push('force-renderer-accessibility');
+@@ -362,7 +362,7 @@
+ 	// `EstablishGpuChannelAsync` - Refs https://issues.chromium.org/issues/40208065
+ 	// `GlobalShortcutsPortal` - Enables Electron's `globalShortcut` (system-wide keybindings) on Linux Wayland via the XDG global shortcuts portal (no-op elsewhere)
+ 	const featuresToEnable =
+-		`NetAdapterMaxBufSizeFeature:NetAdapterMaxBufSize/8192,DocumentPolicyIncludeJSCallStacksInCrashReports,EarlyEstablishGpuChannel,EstablishGpuChannelAsync${process.platform === 'linux' ? ',GlobalShortcutsPortal' : ''},${app.commandLine.getSwitchValue('enable-features')}`;
++		`NetAdapterMaxBufSizeFeature:NetAdapterMaxBufSize/8192,DocumentPolicyIncludeJSCallStacksInCrashReports,EarlyEstablishGpuChannel,EstablishGpuChannelAsync${(process.platform === 'linux' || process.platform === 'sunos') ? ',GlobalShortcutsPortal' : ''},${app.commandLine.getSwitchValue('enable-features')}`;
+ 	app.commandLine.appendSwitch('enable-features', featuresToEnable);
+ 
+ 	// Following features are disabled from the runtime:
+@@ -515,7 +515,7 @@
+ 		const appCenter = product.appCenter;
+ 		if (appCenter) {
+ 			const isWindows = (process.platform === 'win32');
+-			const isLinux = (process.platform === 'linux');
++			const isLinux = ((process.platform === 'linux' || process.platform === 'sunos'));
+ 			const isDarwin = (process.platform === 'darwin');
+ 			const crashReporterId = argvConfig['crash-reporter-id'];
+ 			const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+--- a/src/vs/code/electron-main/app.ts	2026-11-18 08:33:07.066282944 +0100
++++ b/src/vs/code/electron-main/app.ts	2026-11-18 08:33:07.066282944 +0100
+@@ -1227,6 +1227,7 @@
+ 				break;
+ 
+ 			case 'linux':
++			case 'sunos': // illumos: as Linux
+ 				if (isLinuxSnap) {
+ 					services.set(IUpdateService, new SyncDescriptor(SnapUpdateService, [process.env['SNAP'], process.env['SNAP_REVISION']]));
+ 				} else {
+--- a/resources/linux/bin/code.sh	2026-11-18 16:38:52.749714690 +0100
++++ b/resources/linux/bin/code.sh	2026-11-18 16:38:52.753714901 +0100
+@@ -13,7 +13,7 @@
+ fi
+ 
+ # test that VSCode wasn't installed inside WSL
+-if grep -qi Microsoft /proc/version && [ -z "$DONT_PROMPT_WSL_INSTALL" ]; then
++if [ -r /proc/version ] && grep -qi Microsoft /proc/version && [ -z "$DONT_PROMPT_WSL_INSTALL" ]; then
+ 	echo "To use @@PRODNAME@@ with the Windows Subsystem for Linux, please install @@PRODNAME@@ in Windows and uninstall the Linux version in WSL. You can then use the \`@@APPNAME@@\` command in a WSL terminal just as you would in a normal command prompt." 1>&2
+ 	printf "Do you want to continue anyway? [y/N] " 1>&2
+ 	read -r YN
+@@ -59,5 +59,8 @@
+ 
+ ELECTRON="$VSCODE_PATH/@@APPNAME@@"
+ CLI="$VSCODE_PATH/resources/app/out/cli.js"
++# illumos: ibus-gtk3 in async mode loses the keys in Electron (as in
++# Chromium); sync mode keeps the input method. The user's value wins.
++export IBUS_ENABLE_SYNC_MODE="${IBUS_ENABLE_SYNC_MODE:-1}"
+ ELECTRON_RUN_AS_NODE=1 "$ELECTRON" "$CLI" "$@"
+ exit $?

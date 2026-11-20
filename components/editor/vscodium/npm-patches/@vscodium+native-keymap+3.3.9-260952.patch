@@ -1,0 +1,15 @@
+illumos (OpenIndiana): build the X11 keyboard layout code (keyboard_x.cc)
+as on Linux; OI has libX11 and libxkbfile with pkg-config files.
+Upstream: https://github.com/microsoft/node-native-keymap
+
+--- a/binding.gyp	1985-10-26 09:15:00.000000000 +0100
++++ b/binding.gyp	2026-11-17 22:38:58.738529483 +0100
+@@ -32,7 +32,7 @@
+         }
+       },
+       "conditions": [
+-        ['OS=="linux"', {
++        ['OS=="linux" or OS=="solaris"', {
+           "sources": [
+             "deps/chromium/x/keysym_to_unicode.cc",
+             "src/keyboard_x.cc"

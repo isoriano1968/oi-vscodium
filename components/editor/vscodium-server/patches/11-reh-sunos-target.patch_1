@@ -1,0 +1,61 @@
+The server build learns a sunos-x64 target. It bundles no node, because the
+package links node to OpenIndiana's runtime/nodejs-24 (nodejs.org has no illumos
+build). cleanNodeModules() reads .moduleignore.<host platform>. VSCodium's own
+53-ext-copilot-remove-it takes Copilot out, so unlike code-oss-server no
+Copilot gating is needed here.
+OpenIndiana-specific; not for upstream as is.
+
+--- a/build/gulpfile.reh.ts
++++ b/build/gulpfile.reh.ts
+@@ -51,6 +51,9 @@
+ 	{ platform: 'linux', arch: 'x64' },
+ 	{ platform: 'linux', arch: 'arm64' },
+ 	{ platform: 'alpine', arch: 'arm64' },
++	// illumos (OpenIndiana): the server runs on the system's Node.js
++	// (runtime/nodejs-24), which nodejs.org has no build of.
++	{ platform: 'sunos', arch: 'x64' },
+ 	// legacy: we use to ship only one alpine so it was put in the arch, but now we ship
+ 	// multiple alpine images and moved to a better model (alpine as the platform)
+ 	{ platform: 'linux', arch: 'alpine' },
+@@ -168,6 +171,11 @@
+ 	task.task(task.define(`node-${platform}-${arch}`, () => {
+ 		const nodePath = path.join('.build', 'node', `v${nodeVersion}`, `${platform}-${arch}`);
+ 
++		if (platform === 'sunos') {
++			// No bundled node: the package links `node` to the system's Node.js.
++			return Promise.resolve(null);
++		}
++
+ 		if (!fs.existsSync(nodePath)) {
+ 			util.rimraf(nodePath);
+ 
+@@ -411,7 +419,7 @@
+ 				gulp.src('resources/server/bin/code-server.cmd', { base: '.' })
+ 					.pipe(rename(`bin/${product.serverApplicationName}.cmd`)),
+ 			);
+-		} else if (platform === 'linux' || platform === 'alpine' || platform === 'darwin') {
++		} else if (platform === 'linux' || platform === 'alpine' || platform === 'darwin' || platform === 'sunos') {
+ 			result = es.merge(result,
+ 				gulp.src(`resources/server/bin/remote-cli/${platform === 'darwin' ? 'code-darwin.sh' : 'code-linux.sh'}`, { base: '.' })
+ 					.pipe(replace('@@VERSION@@', version))
+--- a/build/.moduleignore.sunos
++++ b/build/.moduleignore.sunos
+@@ -0,0 +1,17 @@
++@vscode/windows-mutex/index.js
++@vscode/windows-mutex/**/*.node
++@vscode/windows-mutex/*.md
++@vscode/windows-mutex/package.json
++
++@vscode/windows-process-tree/lib/**
++@vscode/windows-process-tree/**/*.node
++@vscode/windows-process-tree/LICENSE
++@vscode/windows-process-tree/package.json
++@vscode/windows-process-tree/*.md
++
++@vscode/windows-registry/dist/**
++@vscode/windows-registry/**/*.node
++@vscode/windows-registry/*.md
++@vscode/windows-registry/*.txt
++@vscode/windows-registry/package.json
++!@vscode/windows-registry/dist/index.d.ts
+\ No newline at end of file

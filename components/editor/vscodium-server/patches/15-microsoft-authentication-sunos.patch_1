@@ -1,0 +1,35 @@
+The microsoft-authentication build threw 'Unsupported platform' on sunos and
+treated every non-Windows, non-macOS system as Linux (copying Linux MSAL .so
+files). On sunos there is no native broker; the extension uses the browser flow.
+
+--- a/extensions/microsoft-authentication/esbuild.mts
++++ b/extensions/microsoft-authentication/esbuild.mts
+@@ -12,16 +12,18 @@
+ 
+ const isWindows = process.platform === 'win32';
+ const isMacOS = process.platform === 'darwin';
+-const isLinux = !isWindows && !isMacOS;
++const isLinux = process.platform === 'linux';
+ 
+ const windowsArches = ['x64'];
+ const linuxArches = ['x64'];
+ 
+-let platformFolder: string;
++let platformFolder: string | undefined;
+ switch (process.platform) {
+ 	case 'win32': platformFolder = 'windows'; break;
+ 	case 'darwin': platformFolder = 'macos'; break;
+ 	case 'linux': platformFolder = 'linux'; break;
++	// No native MSAL broker elsewhere (e.g. illumos): the extension uses the browser flow.
++	case 'sunos': platformFolder = undefined; break;
+ 	default: throw new Error(`Unsupported platform: ${process.platform}`);
+ }
+ 
+@@ -32,6 +34,7 @@
+  */
+ async function copyNativeMsalFiles(outDir: string): Promise<void> {
+ 	if (
++		!platformFolder ||
+ 		!(isWindows && windowsArches.includes(arch)) &&
+ 		!isMacOS &&
+ 		!(isLinux && linuxArches.includes(arch))

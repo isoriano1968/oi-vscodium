@@ -1,0 +1,15 @@
+illumos (OpenIndiana): the Linux policy watcher (a stub that reads no
+policies), as on Linux.
+Upstream: https://github.com/microsoft/vscode-policy-watcher
+
+--- a/binding.gyp	1985-10-26 09:15:00.000000000 +0100
++++ b/binding.gyp	2026-11-17 22:38:58.738529483 +0100
+@@ -33,7 +33,7 @@
+                         "ARCHS": ["arm64"]
+                     }
+                 }],
+-                ['OS=="linux"', {
++                ['OS=="linux" or OS=="solaris"', {
+                     "sources": [
+                         "src/linux/PolicyWatcher.cc",
+                     ],

@@ -1,0 +1,79 @@
+Webviews (extension details pages, Markdown preview, extension panels) come
+from this server, not from Microsoft's vscode-cdn.net. The browser client
+otherwise loads them from product.json's webviewContentExternalBaseUrlTemplate,
+which on VSCodium points to an old Microsoft build on the CDN: its service
+worker does not match this client ("Found unexpected service worker version.
+Found: 4. Expected: 6") and the pages stay empty; offline they cannot load at
+all.
+
+- webClientServer.ts: the server passes webviewEndpoint, the webview files under
+  its own /static route.
+- environmentService.ts: the client makes that path absolute (the webview code
+  needs the endpoint's origin).
+- pre/index.html: a webview served from the workbench's own origin cannot carry
+  the per-webview hostname that index.html checks, so the same origin is
+  accepted; the CSP hash of the inline script is updated to match.
+  As code-server does; the webviews then share the workbench's origin, which
+  suits this per-user server on 127.0.0.1.
+
+Could go upstream (microsoft/vscode, as an option of the server's web client).
+
+--- a/src/vs/server/node/webClientServer.ts
++++ b/src/vs/server/node/webClientServer.ts
+@@ -424,7 +424,10 @@
+ 			folderUri: resolveWorkspaceURI(this._environmentService.args['default-folder']),
+ 			workspaceUri: resolveWorkspaceURI(this._environmentService.args['default-workspace']),
+ 			productConfiguration,
+-			callbackRoute: callbackRoute
++			callbackRoute: callbackRoute,
++			// Webviews from this server, not from Microsoft's vscode-cdn.net, which
++			// has only Microsoft's own builds (commits).
++			webviewEndpoint: posix.join(staticRoute, 'out/vs/workbench/contrib/webview/browser/pre')
+ 		};
+ 
+ 		const cookies = cookie.parse(req.headers.cookie || '');
+--- a/src/vs/workbench/contrib/webview/browser/pre/index.html
++++ b/src/vs/workbench/contrib/webview/browser/pre/index.html
+@@ -5,7 +5,7 @@
+ 	<meta charset="UTF-8">
+ 
+ 	<meta http-equiv="Content-Security-Policy"
+-		content="default-src 'none'; script-src 'sha256-7cKy9iQfWRXcgRS74x6I4q5cRDkv8nQz51jecqMmQ5w=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
++		content="default-src 'none'; script-src 'sha256-Zzp95sw2ShG1XGhmLXU+xzK8GCXE5mPIvsHOiW5CCHo=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
+ 
+ 	<!-- Disable pinch zooming -->
+ 	<meta name="viewport"
+@@ -345,6 +345,12 @@
+ 
+ 				const hostname = location.hostname;
+ 
++				// Served by the workbench's own server (vscode-server's webviewEndpoint):
++				// the same origin cannot carry the per-webview hostname checked below.
++				if (parentOrigin === location.origin) {
++					return start(parentOrigin);
++				}
++
+ 				if (!crypto.subtle) {
+ 					// cannot validate, not running in a secure context
+ 					throw new Error(`'crypto.subtle' is not available so webviews will not work. This is likely because the editor is not running in a secure context (https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts).`);
+--- a/src/vs/workbench/services/environment/browser/environmentService.ts
++++ b/src/vs/workbench/services/environment/browser/environmentService.ts
+@@ -12,6 +12,7 @@
+ import { IWorkbenchConstructionOptions } from '../../../browser/web.api.js';
+ import { IProductService } from '../../../../platform/product/common/productService.js';
+ import { memoize } from '../../../../base/common/decorators.js';
++import { mainWindow } from '../../../../base/browser/window.js';
+ import { onUnexpectedError } from '../../../../base/common/errors.js';
+ import { parseLineAndColumnAware } from '../../../../base/common/extpath.js';
+ import { LogLevelToString } from '../../../../platform/log/common/log.js';
+@@ -239,7 +240,9 @@
+ 
+ 	@memoize
+ 	get webviewExternalEndpoint(): string {
+-		const endpoint = this.options.webviewEndpoint
++		// A server path (webviewEndpoint from vscode-server) is made absolute here:
++		// the webview code needs the origin of the endpoint.
++		const endpoint = (this.options.webviewEndpoint && new URL(this.options.webviewEndpoint, mainWindow.location.href).toString())
+ 			|| this.productService.webviewContentExternalBaseUrlTemplate
+ 			|| 'https://{{uuid}}.vscode-cdn.net/{{quality}}/{{commit}}/out/vs/workbench/contrib/webview/browser/pre/';
+ 
