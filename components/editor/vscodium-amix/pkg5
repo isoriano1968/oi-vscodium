@@ -1,0 +1,7 @@
+{
+    "dependencies": [],
+    "fmris": [
+        "editor/vscodium/extension/vscode-amix"
+    ],
+    "name": "vscode-amix"
+}

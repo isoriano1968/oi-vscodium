@@ -1,13 +1,17 @@
 # VSCodium for OpenIndiana (illumos)
 
-VSCodium 1.143.17232 (VS Code 1.143.1) for OpenIndiana Hipster, as two
+VSCodium 1.143.17232 (VS Code 1.143.1) for OpenIndiana Hipster, as three
 [oi-userland](https://github.com/OpenIndiana/oi-userland) components:
 
 - **`editor/vscodium`**: the desktop editor on our Electron 43 (oi-electron).
 - **`editor/vscodium-server`**: the remote/web server (VS Code's REH target)
   on Node.js 24, with `vscodium-web` to open the editor in a browser.
+- **`editor/vscodium/extension/vscode-amix`**
+  (`components/editor/vscodium-amix`): the AMIX development extension as a
+  built-in extension of the desktop editor, packaged from its release
+  `.vsix` (amix-userland).
 
-Both are built from the pristine VSCodium and VS Code release tarballs, the
+The editor and the server are built from the pristine VSCodium and VS Code release tarballs, the
 same way FreeBSD's `editors/vscode` builds them.
 
 ## What works
