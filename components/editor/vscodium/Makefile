@@ -27,7 +27,8 @@ include ../../../make-rules/shared-macros.mk
 # The version, in one place, as editor/vscodium-server (keep the two equal:
 # a VSCodium client asks for a server of its own commit).
 COMPONENT_VERSION =	1.143.17232
-COMPONENT_REVISION =	2
+# rev 3: bundles electron-43 rev 5 (decommit fix)
+COMPONENT_REVISION =	3
 VSCODE_VERSION =	1.143.1
 VSCODE_COMMIT =		e646868227c3e3a9e3f24277c8c7220be42c0be7
 VSCODIUM_COMMIT :=	$(shell echo $(COMPONENT_VERSION) | /usr/bin/sha1sum | cut -d' ' -f1)
@@ -102,6 +103,13 @@ VSCODE_BUILD_ENV +=	VSCODE_QUALITY=stable OS_NAME=linux VSCODE_ARCH=x64
 VSCODE_BUILD_ENV +=	CI_BUILD=no RELEASE_VERSION=$(COMPONENT_VERSION)
 VSCODE_BUILD_ENV +=	MS_COMMIT=$(VSCODE_COMMIT) MS_TAG=$(VSCODE_VERSION)
 VSCODE_BUILD_ENV +=	NODE_OPTIONS=--max-old-space-size=8192
+# prepare_vscode.sh writes it into package.json's node command lines (upstream's
+# build.sh sets it); empty there, it overrode NODE_OPTIONS with 4 GB.
+VSCODE_BUILD_ENV +=	MAX_OLD_SPACE_SIZE=8192
+# node's malloc is libumem, which grows only by brk; V8's randomly placed heap
+# chunks can land just above the break, and the bundling step then died in
+# malloc (bad_alloc) with memory free. mmap has no such limit.
+VSCODE_BUILD_ENV +=	UMEM_OPTIONS=backend=mmap
 
 NPM_ENV =		$(ENV) $(VSCODE_BUILD_ENV)
 NPM_NO_SCRIPTS =	$(NPM_ENV) npm_config_ignore_scripts=true
